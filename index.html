@@ -63,6 +63,11 @@ input,select,textarea{outline:none}
                 <i class="fas fa-trash mr-2"></i>Xóa dữ liệu
             </button>
 
+            <button onclick="taiDuLieuTuGoogleSheets()"
+                    class="bg-sky-600 hover:bg-sky-700 px-4 py-2 rounded-xl font-bold text-sm">
+                <i class="fas fa-sync-alt mr-2"></i>Đồng bộ
+            </button>
+
             <button onclick="exportExcel()"
                     class="bg-emerald-500 hover:bg-emerald-600 px-5 py-2 rounded-xl font-bold text-sm">
                 <i class="fas fa-file-excel mr-2"></i>Xuất Excel
@@ -181,7 +186,12 @@ input,select,textarea{outline:none}
     <div class="card rounded-3xl overflow-hidden">
 
         <div class="p-5 border-b border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-3">
-            <h2 class="text-xl font-bold">Bảng dữ liệu hỗ trợ</h2>
+            <div>
+                <h2 class="text-xl font-bold">Bảng dữ liệu hỗ trợ</h2>
+                <p class="text-xs text-slate-500 mt-1">
+                    Dữ liệu chính được lưu trên Google Sheets
+                </p>
+            </div>
 
             <input type="text" id="search" onkeyup="timKiem()"
                    placeholder="Tìm MST hoặc tên công ty..."
@@ -245,17 +255,73 @@ for(let i = 0; i < 70; i++){
    DATA LOCAL
    ========================================================= */
 
-const DATA_VERSION = "v4";
+const DATA_VERSION = "v5";
 
-if(localStorage.getItem("dsHoTro_data_version") !== DATA_VERSION){
-    localStorage.removeItem("dsHoTro");
-    localStorage.setItem("dsHoTro_data_version", DATA_VERSION);
-}
-
+/*
+ * GOOGLE SHEETS LÀ KHO DỮ LIỆU CHÍNH.
+ * localStorage chỉ dùng làm bộ nhớ tạm/dự phòng.
+ */
 let dsHoTro = JSON.parse(localStorage.getItem("dsHoTro")) || [];
 
+/*
+ * Khi mở trang:
+ * 1. Hiển thị dữ liệu local ngay để trang không bị trống.
+ * 2. Sau đó tải dữ liệu mới nhất từ Google Sheets.
+ */
 renderTable();
 capNhatThongKe();
+taiDuLieuTuGoogleSheets();
+
+/* =========================================================
+   TẢI DỮ LIỆU TỪ GOOGLE SHEETS
+   ========================================================= */
+
+async function taiDuLieuTuGoogleSheets(){
+
+    try{
+
+        const res = await fetch(GOOGLE_SCRIPT_URL + "?action=getData", {
+            method: "GET",
+            cache: "no-store"
+        });
+
+        if(!res.ok){
+            throw new Error("HTTP " + res.status);
+        }
+
+        const data = await res.json();
+
+        if(data && Array.isArray(data.data)){
+
+            dsHoTro = data.data.map(item => ({
+                mst: item.mst || "",
+                sdt: item.sdt || "",
+                tencty: item.tencty || "",
+                loai: item.loai || "HĐ",
+                nguoiHoTro: item.nguoiHoTro || NGUOI_HO_TRO,
+                vanDe: item.vanDe || "",
+                cskh: item.cskh || ""
+            }));
+
+            localStorage.setItem("dsHoTro", JSON.stringify(dsHoTro));
+
+            renderTable();
+            capNhatThongKe();
+
+            thongBao("Đã tải dữ liệu từ Google Sheets ✓");
+        }
+
+    }catch(error){
+
+        console.error("Lỗi tải Google Sheets:", error);
+
+        if(dsHoTro.length > 0){
+            thongBao("Không kết nối được Google Sheets, đang dùng dữ liệu trên máy");
+        }else{
+            thongBao("Không tải được dữ liệu Google Sheets");
+        }
+    }
+}
 
 /* =========================================================
    TRA CỨU MST
@@ -327,28 +393,79 @@ async function luuThongTin(){
         cskh: cskh
     };
 
-    dsHoTro.unshift(item);
-    localStorage.setItem("dsHoTro", JSON.stringify(dsHoTro));
-    renderTable();
-    capNhatThongKe();
-
     btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>ĐANG GỬI...';
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>ĐANG LƯU...';
 
     try{
-        await fetch(GOOGLE_SCRIPT_URL, {
+
+        const res = await fetch(GOOGLE_SCRIPT_URL, {
             method: "POST",
-            mode: "no-cors",
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-            body: JSON.stringify(item)
+            headers: {
+                "Content-Type": "text/plain;charset=utf-8"
+            },
+            body: JSON.stringify({
+                action: "add",
+                ...item
+            })
         });
-        thongBao("Đã lưu và gửi Google Sheets ✓");
+
+        /*
+         * Một số Google Apps Script Web App có thể trả JSON.
+         * Nếu no-cors/response không đọc được thì dữ liệu vẫn đã được gửi.
+         */
+        let result = null;
+
+        try{
+            result = await res.json();
+        }catch(e){
+            result = null;
+        }
+
+        if(result && result.success === false){
+            throw new Error(result.message || "Google Sheets từ chối lưu");
+        }
+
+        /*
+         * Sau khi gửi thành công, tải lại từ Google Sheets
+         * để bảng luôn khớp với dữ liệu trung tâm.
+         */
+        dsHoTro.unshift(item);
+        localStorage.setItem("dsHoTro", JSON.stringify(dsHoTro));
+
+        renderTable();
+        capNhatThongKe();
+
+        thongBao("Đã lưu vào Google Sheets ✓");
+
+        /*
+         * Đồng bộ lại toàn bộ dữ liệu sau một khoảng ngắn,
+         * phòng trường hợp Apps Script xử lý chậm.
+         */
+        setTimeout(() => {
+            taiDuLieuTuGoogleSheets();
+        }, 800);
+
     }catch(error){
+
         console.error("Lỗi gửi Google Sheets:", error);
-        thongBao("Đã lưu trên web nhưng gửi Google Sheets thất bại!");
+
+        /*
+         * Nếu gửi thất bại thì vẫn giữ bản ghi trên máy
+         * để tránh mất dữ liệu người dùng vừa nhập.
+         */
+        dsHoTro.unshift(item);
+        localStorage.setItem("dsHoTro", JSON.stringify(dsHoTro));
+
+        renderTable();
+        capNhatThongKe();
+
+        thongBao("Lưu trên máy, nhưng gửi Google Sheets thất bại!");
+
     }finally{
+
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-save mr-2"></i>LƯU THÔNG TIN';
+
     }
 
     xoaForm();
